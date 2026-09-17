@@ -1,150 +1,169 @@
 // app/checkout/[id]/page.tsx
-"use client";
-import { useState, use } from 'react';
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
 import Link from 'next/link';
 
-const mockBooks = [
-  { id: '1', title: '100 Prompts for Vibe Coding', price: 199 },
-  { id: '2', title: 'Productive Lazy', price: 250 },
-  { id: '3', title: 'มังงะ Bug Slayer', price: 120 }
-];
+export default function CheckoutPage() {
+  const params = useParams();
+  const router = useRouter();
+  const bookId = params.id;
 
-export default function Checkout({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const book = mockBooks.find((b) => b.id === id);
-  
+  const [book, setBook] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
-  const [status, setStatus] = useState<'IDLE' | 'PENDING' | 'PAID'>('IDLE');
-  
-  // เพิ่ม State สำหรับเก็บรหัสออเดอร์และสถานะการโหลด
-  const [orderId, setOrderId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
-  if (!book) return <div className="text-center py-20 text-2xl">ไม่พบข้อมูล</div>;
+  useEffect(() => {
+    async function fetchBook() {
+      const { data: books } = await supabase.from('books').select('*');
+      const foundBook = books?.find((b: any) => String(b.id) === String(bookId));
+      if (foundBook) {
+        setBook(foundBook);
+      }
+      setLoading(false);
+    }
+    if (bookId) {
+      fetchBook();
+    }
+  }, [bookId]);
 
-  // 1. ฟังก์ชันสร้างคำสั่งซื้อ (ยิง API ไปเซฟลง Supabase เป็น PENDING)
-  const handleCreateOrder = async (e: React.FormEvent) => {
+  const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
+    if (!name || !email || !book) return;
+    setSubmitting(true);
+
     try {
-      const res = await fetch('/api/order', {
+      // 1. บันทึกคำสั่งซื้อลงตาราง orders ใน Supabase (ใช้รหัส book_id เป็นข้อความ/ตัวเลขตามจริง)
+      const { data: orderData, error: orderError } = await supabase
+        .from('orders')
+        .insert([
+          {
+            book_id: book.id,
+            customer_name: name,
+            customer_email: email,
+            status: 'PENDING',
+          },
+        ])
+        .select()
+        .single();
+
+      if (orderError) {
+        console.error('Supabase Order Error:', orderError);
+        alert('เกิดข้อผิดพลาดในการบันทึกคำสั่งซื้อ: ' + (orderError.message || 'โปรดตรวจสอบตาราง orders ใน Supabase'));
+        setSubmitting(false);
+        return;
+      }
+
+      // 2. เรียก API ส่งเมลผ่าน Resend
+      const res = await fetch('/api/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bookId: book.id, customerName: name, customerEmail: email }),
+        body: JSON.stringify({
+          orderId: orderData.id,
+          email: email,
+          name: name,
+          bookTitle: book.title,
+        }),
       });
-      const data = await res.json();
-      
-      if (data.success) {
-        setOrderId(data.order.id); // เก็บ ID ที่ได้จากฐานข้อมูล
-        setStatus('PENDING'); // เปลี่ยนหน้าจอไปรอชำระเงิน
+
+      if (res.ok) {
+        router.push(`/download?order=${orderData.id}`);
       } else {
-        alert('เกิดข้อผิดพลาด: ' + data.error);
+        // แม้ส่งเมลไม่ผ่าน แต่บันทึกออเดอร์สำเร็จ ให้พาไปหน้าดาวน์โหลดได้ปกติ
+        router.push(`/download?order=${orderData.id}`);
       }
-    } catch (error) {
-      alert('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้');
-    } finally {
-      setIsLoading(false);
+    } catch (err) {
+      console.error(err);
+      alert('เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง');
+      setSubmitting(false);
     }
   };
 
-  // 2. ฟังก์ชันจำลองจ่ายเงิน (ยิง API ไปแก้สถานะเป็น PAID และส่งอีเมล)
-  const handleMockPayment = async () => {
-    if (!orderId) return;
-    setIsLoading(true);
-    try {
-      const res = await fetch('/api/payment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId }),
-      });
-      const data = await res.json();
-      
-      if (data.success) {
-        setStatus('PAID'); // เปลี่ยนหน้าจอเป็นชำระเงินสำเร็จ
-      } else {
-        alert('เกิดข้อผิดพลาด: ' + data.error);
-      }
-    } catch (error) {
-      alert('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  if (loading) {
+    return <div className="min-h-screen flex items-center justify-center text-slate-400 font-sans">กำลังโหลดข้อมูล...</div>;
+  }
+
+  if (!book) {
+    return (
+      <div className="min-h-screen bg-[#F8FAFC] flex flex-col items-center justify-center p-6 text-center font-sans">
+        <div className="text-5xl mb-4">🛒</div>
+        <h1 className="text-2xl font-black text-slate-900 mb-2">ไม่พบข้อมูลหนังสือสำหรับการชำระเงิน</h1>
+        <p className="text-slate-500 text-sm mb-6">กรุณากลับไปเลือกหนังสือใหม่อีกครั้ง</p>
+        <Link href="/" className="px-6 py-3 bg-blue-600 text-white font-bold text-xs rounded-xl shadow hover:bg-blue-700 transition-colors">
+          ← กลับสู่หน้าแรก
+        </Link>
+      </div>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-gray-50 py-12 px-4 flex justify-center items-start pt-20">
-      <div className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8 border border-gray-100">
-        <h1 className="text-2xl font-extrabold text-center text-gray-900 mb-6">สรุปคำสั่งซื้อ</h1>
-        
-        <div className="bg-gray-50 p-4 rounded-xl mb-6 flex justify-between items-center">
-          <span className="font-bold text-gray-800">{book.title}</span>
-          <span className="font-bold text-lg text-blue-600">฿{book.price}</span>
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-800 font-sans">
+      <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-slate-100 shadow-sm">
+        <div className="max-w-4xl mx-auto px-6 h-20 flex items-center justify-between">
+          <Link href="/" className="flex items-center space-x-2">
+            <span className="text-xl bg-gradient-to-tr from-blue-600 to-indigo-500 p-2 rounded-xl text-white shadow">📚</span>
+            <span className="font-extrabold text-lg text-slate-900">Vibe E-Book</span>
+          </Link>
+          <Link href={`/book/${book.id}`} className="text-xs font-bold text-blue-600 hover:underline">
+            ← กลับไปหน้าหนังสือ
+          </Link>
         </div>
+      </header>
 
-        {/* สถานะ 1: กรอกฟอร์ม */}
-        {status === 'IDLE' && (
-          <form onSubmit={handleCreateOrder} className="space-y-4">
+      <main className="max-w-3xl mx-auto px-6 py-12">
+        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 md:p-10">
+          <h1 className="text-2xl font-black text-slate-900 mb-6 border-l-4 border-blue-600 pl-3">
+            ยืนยันคำสั่งซื้อและชำระเงิน
+          </h1>
+
+          <div className="flex items-center space-x-4 bg-slate-50 p-4 rounded-2xl border border-slate-100 mb-8">
+            <img src={book.cover} alt={book.title} className="w-16 h-20 object-cover rounded-xl shadow" />
+            <div className="flex-grow">
+              <h3 className="font-bold text-slate-900 text-base">{book.title}</h3>
+              <p className="text-xs text-slate-500 mt-1">ผู้แต่ง: {book.author || 'Vibe Team'}</p>
+              <p className="font-black text-blue-600 text-lg mt-1">฿{book.price}</p>
+            </div>
+          </div>
+
+          <form onSubmit={handleCheckout} className="space-y-5">
             <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">ชื่อ-นามสกุล</label>
+              <label className="block text-xs font-bold text-slate-700 mb-2">ชื่อ -นามสกุล (สำหรับออกหลักฐาน)</label>
               <input 
-                type="text" required value={name} onChange={(e) => setName(e.target.value)}
-                className="w-full px-4 py-2 rounded-xl border border-gray-300 outline-none focus:ring-2 focus:ring-blue-500"
+                type="text" 
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="กรอกชื่อของคุณ..." 
+                required
+                className="w-full px-4 py-3 rounded-xl bg-slate-50 text-sm border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
+
             <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">อีเมล</label>
+              <label className="block text-xs font-bold text-slate-700 mb-2">อีเมล (สำหรับรับลิงก์ดาวน์โหลด PDF/EPUB)</label>
               <input 
-                type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-4 py-2 rounded-xl border border-gray-300 outline-none focus:ring-2 focus:ring-blue-500"
+                type="email" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="กรอกอีเมลของคุณ (เช่น user@gmail.com)..." 
+                required
+                className="w-full px-4 py-3 rounded-xl bg-slate-50 text-sm border border-slate-200 outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
+
             <button 
               type="submit" 
-              disabled={isLoading}
-              className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+              disabled={submitting}
+              className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-2xl shadow-lg shadow-blue-200 transition-all mt-4"
             >
-              {isLoading ? 'กำลังบันทึกข้อมูล...' : 'สร้างคำสั่งซื้อ'}
+              {submitting ? 'กำลังดำเนินการชำระเงิน...' : `💳 ชำระเงินจำนวน ฿{book.price} ทันที`}
             </button>
           </form>
-        )}
-
-        {/* สถานะ 2: รอชำระเงิน (PENDING) */}
-        {status === 'PENDING' && (
-          <div className="mt-6 border-t pt-6 text-center space-y-4">
-            <div className="bg-red-100 text-red-600 text-sm font-extrabold px-4 py-2 rounded-full inline-block animate-pulse">
-              ⚠️ DEMO ONLY ⚠️
-            </div>
-            <p className="text-gray-600 font-medium">คำสั่งซื้อสร้างสำเร็จ (สถานะ: PENDING)</p>
-            <p className="text-xs text-gray-400 break-all">Order ID: {orderId}</p>
-            <button 
-              onClick={handleMockPayment}
-              disabled={isLoading}
-              className="w-full bg-green-500 text-white font-bold py-4 rounded-xl hover:bg-green-600 transition-colors shadow-lg disabled:bg-gray-400"
-            >
-              {isLoading ? 'กำลังประมวลผล...' : 'จำลองชำระเงินสำเร็จ'}
-            </button>
-          </div>
-        )}
-
-        {/* สถานะ 3: ชำระเงินสำเร็จ (PAID) */}
-        {status === 'PAID' && (
-          <div className="mt-6 border-t pt-6 text-center space-y-4">
-            <div className="text-5xl">🎉</div>
-            <h2 className="text-xl font-bold text-green-600">ชำระเงินสำเร็จ! (PAID)</h2>
-            <p className="text-gray-600 text-sm">
-              ระบบได้ส่งลิงก์ดาวน์โหลด E-book ไปที่:<br/><span className="font-bold text-gray-900">{email}</span>
-            </p>
-            <Link href="/" className="inline-block mt-4 text-blue-600 underline">กลับไปหน้าแรก</Link>
-          </div>
-        )}
-
-        {status === 'IDLE' && (
-          <div className="mt-6 text-center">
-            <Link href={`/book/${book.id}`} className="text-sm text-gray-500 hover:text-gray-800 underline">ยกเลิก</Link>
-          </div>
-        )}
-      </div>
-    </main>
+        </div>
+      </main>
+    </div>
   );
 }
